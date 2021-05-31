@@ -1,0 +1,322 @@
+# The rank function is used on the pop dictionary ('Number of the sample' => '[Values of the parameters]) and will return the pop Dict with sample number corresponding to the score of the parameters.
+
+function Rank(pop, ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    temp_dict = Dict()
+    for i in values(pop)
+        #run simulation here
+        temp_dict[i] = Score(i, ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    end
+    FINPOP = Dict()
+
+    LISTKEYS = []
+    for i in keys(temp_dict)
+        append!(LISTKEYS, [i])
+    end 
+
+    j = 1
+    for i in LISTKEYS
+        FINPOP[j]=findmin(temp_dict)[2]
+        delete!(temp_dict, findmin(temp_dict)[2])
+        j+=1
+    end
+    return FINPOP    
+end
+
+function Positive(list)
+    j = 1
+    for i in list
+        if i <= 0
+            list[j] = 0.0001
+        end
+        j +=1
+    end
+    return list
+end
+
+
+# The function SimPmat simulate the microfluidic experiment but only return the values of Pmat
+
+function SimPmat(model!,u0, PARAMS,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    if length(SWITCHTIMES)==1
+        solU, SolDU = solvemodel(model!,u0,PARAMS,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES);
+        Pmat = [datum for subarr in solU.u for datum in subarr[idx_Pmat]];
+        return Pmat
+    else 
+        solU, SolDU = solvemodel_frac(model!,u0,PARAMS,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES);
+        Pmat = [datum for subarr in solU.u for datum in subarr[idx_Pmat]];
+        return Pmat
+    end
+end
+
+# The function Confronte take the parameters from two samples and pick a child inside of the hypersquared defined by the two 'parents'
+
+function Confronte(x1, x2, i, j)
+    #Generation of a 'child' inside of the hypersquare
+    d = (x2 .- x1)/2
+    beta = (abs(j-i)-1)/(POPSIZE-2)
+    R = rand(Float64,(NPARAM,1))
+    if i<j
+        alpha = 1
+    else
+        alpha = -1
+    end
+    c1 = x1  .- d*(1+alpha*beta)
+    c2 = x2 .+ d*(1-alpha*beta)
+    CHILD = c1+(c2-c1) .* R
+    CHILD = Positive(CHILD)
+    return CHILD
+end
+
+# The Score function compute the simulation with a liste of parameters as an input and return the corresponding squared distance with the reference simulation
+
+function Score(x, ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    score = SimPmat(model!,u0, x,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    return norm(score - ref)
+end
+
+function go_beyond(x_bestch, x_par, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    x_ch =x_bestch
+    x_pr = x_par
+    improve = 1
+    A = 1
+    while Score(x_ch, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)<Score(x_pr, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+        x_temp = x_ch .- (x_pr -x_ch) ./ A
+        x_temp = Positive(x_temp)
+        x_pr = x_ch
+        if Score(x_temp, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES) <= Score(x_ch, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+            x_ch = x_temp
+        else
+            return x_ch
+        end
+        improve += 1
+        if improve == 2
+            A = A/2
+            improve = 0
+        end
+    return x_ch
+    end     
+end
+
+function Get_final_State(FinPop)
+    PARAM = Array{Tuple{Float64,Float64},1}()
+    for i in 1:size(FinPop)[2]
+        pop_min = maximum(FinPop[:,i])
+        pop_max =  minimum(FinPop[:,i])
+        New_Para = [(pop_min, pop_max)]
+        append!(PARAM,New_Para)
+    end
+    return PARAM
+end            
+
+function Score_OED_Dcrit(INPOP)
+    EST_PARA = zeros(Float64, length(keys(INPOP)), 7)
+    j = 1
+    for i in values(INPOP)
+        EST_PARA[j, :] = i
+        j += 1
+    end
+    COV = cov(EST_PARA)
+    #COV = inv(COV)
+    return det(COV)
+end
+
+function Score_OED_Ecrit(INPOP)
+    PARA_VAL = zeros(Float64, POPSIZE, 7)
+    j = 1
+    for i in values(INPOP)
+        PARA_VAL[j, :] = i
+        j += 1
+    end
+    COVMATRIX = cov(PARA_VAL)
+    COVMATRIX = inv(COVMATRIX)
+    EIGENVAL = eigvals(COVMATRIX)
+    MIN = EIGENVAL[1]
+    MAX = EIGENVAL[length(EIGENVAL)]
+    ECRIT = MIN/MAX
+end
+
+function OED_V0(NB_PHASES)
+    BEST_SCORE = 1
+    BEST_DESIGN = []
+    DESIGN_SPACE = [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
+    for i in 1:20
+        DESIGN = shuffle!(DESIGN_SPACE)
+        DESIGN = DESIGN[1:NB_PHASES]
+        SWITCHTIMES = DESIGN
+        naive_ref = SimPmat(model!,u0, PARAMS,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+        INPOP_rd = ESS_seq(POPSIZE, NBGEN, PARA_ref, PARA_var, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES,online,IniPara)
+        SCORE = Score_OED_Dcrit(INPOP_rd)
+        if SCORE<BEST_SCORE
+            BEST_SCORE = SCORE
+            BEST_DESIGN = DESIGN
+        end
+    end
+    return BEST_SCORE,BEST_DESIGN
+end
+
+function Trace_sim(INPOP,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+
+    SIM = SimPmat(model!,u0, INPOP[1],TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    SIM_MAT = zeros(Float32,length(keys(INPOP)),length(SIM))
+    STAT_MAT = zeros(Float32, 5,length(SIM))
+
+    for i in keys(INPOP)
+        SIM = SimPmat(model!,u0, INPOP[i],TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+        SIM_MAT[i,:] = SIM
+    end
+    for i in 1:size(SIM_MAT)[2]
+        temp_list = SIM_MAT[:,i]
+        STAT_MAT[1,i] = minimum(temp_list)
+        STAT_MAT[2,i] = maximum(temp_list)
+        STAT_MAT[3,i] = mean(temp_list)
+        STAT_MAT[4,i] = mean(temp_list) .+ std(temp_list)
+        STAT_MAT[5,i] = mean(temp_list) .- std(temp_list)
+    end
+
+return STAT_MAT
+end
+
+function ESS_seq(POPSIZE, NBGEN, PARA_ref, PARA_var, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES,online ,IniPara)
+
+    NPARAM = length(PARA_ref)
+    plan, _= LHCoptim(10*NPARAM, NPARAM, 0)
+    if online ==1
+        PARAM = SET_PARAM(PARA_ref, PARA_var)
+    elseif online ==2
+        PARAM = IniPara
+        println(PARAM)
+    end
+
+##  Initialisation:
+    #Generate the Latin Hypercube Sampling
+    scaled_plan = scaleLHC(plan,PARAM)
+    scaled_plan = scaleLHC(plan,PARAM)
+    Selec_dict = Dict()
+
+    #The first loop will simulate insilico experiment with 70 parameters values and return the best 20 results with the L2 norm as a cost function
+
+    for i in 1:size(scaled_plan,1)
+        score = Score(scaled_plan[i, :], naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+        Selec_dict[i] = score
+    end
+
+
+#Select the POPSIZE best entries by increasing score
+    INPOP = Dict()
+    j = 1
+    while j<=POPSIZE
+        INPOP[j] = scaled_plan[findmin(Selec_dict)[2], :]
+        delete!(Selec_dict, findmin(Selec_dict)[2])
+        j+=1
+    end
+
+##  Main loop:
+    h = 1
+    while Score(INPOP[POPSIZE],naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES) >= 0.01
+    println("Generation ",h)
+    println("Best score:",Score(INPOP[1],naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES), " Worst score:", Score(INPOP[POPSIZE],naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES))
+    h+=1
+    if h==200
+        return INPOP
+    end
+    if 1 - Score(INPOP[1],naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)/Score(INPOP[POPSIZE],naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)<=0.01
+        return INPOP
+    end
+
+    for i in keys(INPOP)
+        x1 = INPOP[i]
+        SCORES_CH = Dict()
+        for j in keys(INPOP)
+            if i != j
+                x2 = INPOP[j]
+                x_ch = Confronte(x1, x2, i, j)
+                #simulate x_ch and run go_beyond if x_ch has a better score as its parents
+                score_ch = Score(x_ch, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+                SCORES_CH[score_ch]=x_ch
+            end
+        end
+        Temp_list=[]
+        for t in keys(SCORES_CH)
+            append!(Temp_list, t)
+        end
+        best_ch = findmin(Temp_list)[1]
+        x_bestch = SCORES_CH[best_ch]
+
+        if Score(x_bestch, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)<Score(x1, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+            x1 = go_beyond(x_bestch, x1,naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+            INPOP[i] = x1
+        end
+        INPOP= Rank(INPOP, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+    end
+    end
+return INPOP
+end
+
+#Function to set the parameters that will change and those who won't. Take as input a vector with 1 if the parameter vary and 0 otherwise. Return an array with the range of each parameter.
+
+function SET_PARAM(PARA_ref, PARA_var)
+    PARAM = Array{Tuple{Float64,Float64},1}()
+    for i in 1:length(PARA_ref)
+        if PARA_var[i]==1
+            BOUNDS = [(PARA_ref[i]/10,PARA_ref[i]*10)]
+            append!(PARAM,BOUNDS)
+        elseif PARA_var[i]==2
+                False_val=(rand(1:1000)/500)*PARA_ref[i]
+                BOUNDS = [(False_val,False_val)]
+                append!(PARAM,BOUNDS)
+        else
+            BOUNDS =[(PARA_ref[i],PARA_ref[i])]
+            append!(PARAM,BOUNDS)
+        end
+    end
+println(PARAM)
+return PARAM
+end
+
+function RelativeError(REF_PARA, EST_PARA)
+    REL_ERROR = copy(EST_PARA)
+    j = 1
+    for i in 1:size(EST_PARA)[1]
+        REL_ERROR[j,:] = map(x -> abs(x), EST_PARA[i,:] .- REF_PARA) ./ REF_PARA
+        j += 1
+    end
+return REL_ERROR
+end
+
+function SumRelativeError(REF_PARA, EST_PARA)
+    REL_ERROR = copy(EST_PARA)
+    for i in 1:length(EST_PARA)
+        REL_ERROR[i] = abs( EST_PARA[i] - REF_PARA[i]) / REF_PARA[i]
+    end
+return sum(REL_ERROR)/7
+end
+
+unction Selective_tree(Nb_stages,PARA_var)
+    #Fracts=collect(0.1:0.1:0.9)
+    Fracts=[0.00,0.3,0.6,0.9]
+    SWITCHTIMES = []
+    Def_Switch = []
+    T_inter = 60.
+    INTERVAL_DIL = 20.
+    for i in 1:Nb_stages
+        println("Stage ",i," on ",Nb_stages)
+        Score=1
+        Dil=0.5
+        TMAX=i*T_inter
+        TSAVE = collect(0:2:TMAX)
+        for j in Fracts
+            SWITCHTIMES=copy(Def_Switch)
+            append!(SWITCHTIMES,j)
+            naive_ref=SimPmat(model!,u0, PARAMS,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES)
+            INPOP=ESS_seq(POPSIZE, NBGEN, PARA_ref, PARA_var, naive_ref,TMAX,INTERVAL_DIL,TSAVE,DIL_FRAC,NSPECIES,SWITCHTIMES,online,IniPara)
+            Temp_score = Score_OED_Dcrit(INPOP)
+            if Temp_score<Score 
+                Score = Temp_score
+                Dil=j
+            end
+            
+        end
+    append!(Def_Switch,Dil)    
+    end
+    return Def_Switch
+end
